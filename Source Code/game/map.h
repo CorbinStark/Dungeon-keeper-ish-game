@@ -11,13 +11,16 @@
 //   CONSTANTS
 //
 
+//#define DIAGONAL_ASTAR
+
 const i32 TILE_SIZE = 16;
 const i32 TILESET_WIDTH = 13; //measured in 16x16 blocked, aka tiles
+const i32 SCROLL_SPEED = 4;
 
 const f32 MAX_SPEED = 0.8;
 const f32 MAX_FORCE = 1.0;
 const f32 MIN_SEPERATION = 10;
-const f32 SCALING_FACTOR = (1/20.0f);
+const f32 SCALING_FACTOR = (1/15.0f);
 const f32 VELOCITY_MINIMUM = 0.95;
 
 //
@@ -37,7 +40,9 @@ enum UnitType {
     UNIT_ORC,
     UNIT_SKELETON,
     UNIT_DRAGON,
-    UNIT_NECROMANCER
+    UNIT_NECROMANCER,
+    UNIT_PLATINO,
+    UNIT_TYPE_COUNT
 };
 
 enum UnitState {
@@ -56,10 +61,9 @@ struct Unit {
 
     i32 expToNext;
     Stats stats;
-    i32 dmg;
+    i32 level;
     i32 hp;
     i32 mana;
-    i32 dodge;
     i32 timer;
 
     UnitType type;
@@ -103,21 +107,43 @@ bool blocked_tile(i32 id) {
 }
 
 static inline
-bool all_sides_blocked(Map* map, i32 x, i32 y) {
-    bool upblocked = true;
-    bool downblocked = true;
-    bool leftblocked = true;
-    bool rightblocked = true;
+void check_blocked_neighbors(Map* map, i32 x, i32 y, bool* up, bool* down, bool* left, bool* right) {
+    *up = true;
+    *down = true;
+    *left = true;
+    *right = true;
 
     if(y-1 >= 0) 
-        upblocked = blocked_tile(map->grid[x + (y-1) * map->width]);
+        *up = blocked_tile(map->grid[x + (y-1) * map->width]);
     if(y + 1 <= map->height)
-        downblocked = blocked_tile(map->grid[x + (y+1) * map->width]);
+        *down = blocked_tile(map->grid[x + (y+1) * map->width]);
     if(x - 1 >= 0)
-        leftblocked = blocked_tile(map->grid[(x-1) + y * map->width]);
+        *left = blocked_tile(map->grid[(x-1) + y * map->width]);
     if(x + 1 <= map->width)
-        rightblocked = blocked_tile(map->grid[(x+1) + y * map->width]);
+        *right = blocked_tile(map->grid[(x+1) + y * map->width]);
+}
 
+static inline
+vec2 get_unblocked_neighbor(Map* map, vec2 tile) {
+    bool upblocked, downblocked, leftblocked, rightblocked;
+    check_blocked_neighbors(map, tile.x, tile.y, &upblocked, &downblocked, &leftblocked, &rightblocked);
+
+    if(!upblocked)
+        return {(f32)tile.x, (f32)tile.y-1};
+    if(!downblocked)
+        return {(f32)tile.x, (f32)tile.y+1};
+    if(!leftblocked)
+        return {(f32)tile.x-1, (f32)tile.y};
+    if(!rightblocked)
+        return {(f32)tile.x+1, (f32)tile.y};
+
+    return tile;
+}
+
+static inline
+bool all_sides_blocked(Map* map, i32 x, i32 y) {
+    bool upblocked, downblocked, leftblocked, rightblocked;
+    check_blocked_neighbors(map, x, y, &upblocked, &downblocked, &leftblocked, &rightblocked);
     if(upblocked && rightblocked && leftblocked && downblocked)
         return true;
     return false;
@@ -130,19 +156,8 @@ void orient_tiles(Map* map) {
             u32 index = x + y * map->width;
             i32 id = map->grid[index];
 
-            bool upblocked = true;
-            bool downblocked = true;
-            bool leftblocked = true;
-            bool rightblocked = true;
-
-            if(y-1 >= 0) 
-                upblocked = blocked_tile(map->grid[x + (y-1) * map->width]);
-            if(y + 1 <= map->height)
-                downblocked = blocked_tile(map->grid[x + (y+1) * map->width]);
-            if(x - 1 >= 0)
-                leftblocked = blocked_tile(map->grid[(x-1) + y * map->width]);
-            if(x + 1 <= map->width)
-                rightblocked = blocked_tile(map->grid[(x+1) + y * map->width]);
+            bool upblocked, downblocked, leftblocked, rightblocked;
+            check_blocked_neighbors(map, x, y, &upblocked, &downblocked, &leftblocked, &rightblocked);
 
             if(blocked_tile(id)) {
                 if(downblocked && rightblocked)
@@ -292,19 +307,29 @@ static inline
 vec2 calculate_seperation(Map* map, UnitList* list, Unit* unit) {
     vec2 total = {0};
 
-    for(u32 i = 0; i < list->size(); ++i) {
-        Unit* a = &(*list)[i];
-        if(a != unit) {
-            f32 dist = getDistanceE(unit->pos.x, unit->pos.y, a->pos.x, a->pos.y);
-            if(dist < MIN_SEPERATION && dist >= 0) {
-                vec2 push = unit->pos - a->pos;
-                total = total + (push/14.0f);
-            }
-        }
-    }
+    // for(u32 i = 0; i < list->size(); ++i) {
+    //     Unit* a = &(*list)[i];
+    //     if(a != unit) {
+    //         f32 dist = getDistanceE(unit->pos.x, unit->pos.y, a->pos.x, a->pos.y);
+    //         if(dist < MIN_SEPERATION && dist >= 0) {
+    //             vec2 push = unit->pos - a->pos;
+    //             total = total + (push/14.0f);
+    //         }
+    //     }
+    // }
 
-    for(u32 x = 0; x < map->width; ++x) {
-        for(u32 y = 0; y < map->height; ++y) {
+    i32 x0 = (unit->pos.x / TILE_SIZE) - 1;
+    i32 x1 = (unit->pos.x / TILE_SIZE) + 1;
+    i32 y0 = (unit->pos.y / TILE_SIZE) - 1;
+    i32 y1 = (unit->pos.y / TILE_SIZE) + 1;
+
+    clamp(&x0, 0, map->width);
+    clamp(&x1, 0, map->width);
+    clamp(&y0, 0, map->height);
+    clamp(&y1, 0, map->height);
+
+    for(u32 x = x0; x < x1; ++x) {
+        for(u32 y = y0; y < y1; ++y) {
             u32 index = x + y * map->width;
 
             if(blocked_tile(map->grid[index])) {
@@ -321,7 +346,6 @@ vec2 calculate_seperation(Map* map, UnitList* list, Unit* unit) {
 
 //
 //   PATHFINDING
-//
 //
 
 static inline
@@ -481,12 +505,13 @@ std::vector<vec2> pathfind(Map* map, vec2 start, vec2 dest) {
     open.push_back(NodePtr(new Node(start.x, start.y, NULL, 0)));
 
     u32 tries = 0;
-    while(!open.empty() && tries < 10000) {
+    while(!open.empty() && tries < 1000) {
         tries++;
 
         std::sort(open.begin(), open.end(), compare_ptr_to_node);
         current = open.back();
         open.pop_back();
+        closed.push_back(current);
 
         if(current->x == dest.x && current->y == dest.y)
             return reconstruct_path(current);
@@ -495,10 +520,8 @@ std::vector<vec2> pathfind(Map* map, vec2 start, vec2 dest) {
         std::vector<vec2> successors = find_successors(map, current, start, dest);
         for(u32 i = 0; i < successors.size(); ++i) {
             vec2 currpt = successors[i];
-            process_successor(currpt.x, currpt.y, getDistanceE(currpt.x, currpt.y, dest.x, dest.y), current, open, closed);
+            process_successor(currpt.x, currpt.y, current->fcost + getDistanceE(currpt.x, currpt.y, dest.x, dest.y), current, open, closed);
         }
-
-        closed.push_back(current);
     }
 
     std::vector<vec2> blank;
@@ -521,15 +544,16 @@ std::vector<vec2> pathfind_astar(Map* map, vec2 start, vec2 dest) {
 
     u16 tries = 0;
     while (!open.empty() && tries < 650) {
-        tries++;
+        //tries++;
 
         std::sort(open.begin(), open.end(), compare_ptr_to_node);
         current = open.back();
         open.pop_back();
+        closed.push_back(current);
 
-        //if (current->x == dest.x && current->y == dest.y) {
-        //    return reconstruct_path(current);
-        //}
+        if (current->x == dest.x && current->y == dest.y) {
+            return reconstruct_path(current);
+        }
 
         //NON-DIAGONALS
         //if heuristic cost = -1 then the tile is blocked and cant be move to.
@@ -538,7 +562,7 @@ std::vector<vec2> pathfind_astar(Map* map, vec2 start, vec2 dest) {
         if (x > map->width) continue;
         if (y > map->height) continue;
         if(!blocked_tile(map->grid[x + y * map->width]))
-            process_successor(x, y, 1 + getDistanceE(x, y, dest.x, dest.y), current, open, closed);
+            process_successor(x, y, current->fcost + getDistanceE(x, y, dest.x, dest.y), current, open, closed);
         else if(dest.x == x && dest.y == y)
             return reconstruct_path(current);
 
@@ -547,7 +571,7 @@ std::vector<vec2> pathfind_astar(Map* map, vec2 start, vec2 dest) {
         if (x > map->width) continue;
         if (y > map->height) continue;
         if(!blocked_tile(map->grid[x + y * map->width]))
-            process_successor(x, y, 1 + getDistanceE(x, y, dest.x, dest.y), current, open, closed);
+            process_successor(x, y, current->fcost + getDistanceE(x, y, dest.x, dest.y), current, open, closed);
         else if(dest.x == x && dest.y == y)
             return reconstruct_path(current);
 
@@ -556,7 +580,7 @@ std::vector<vec2> pathfind_astar(Map* map, vec2 start, vec2 dest) {
         if (x > map->width) continue;
         if (y > map->height) continue;
         if(!blocked_tile(map->grid[x + y * map->width]))
-            process_successor(x, y, 1 + getDistanceE(x, y, dest.x, dest.y), current, open, closed);
+            process_successor(x, y, current->fcost + getDistanceE(x, y, dest.x, dest.y), current, open, closed);
         else if(dest.x == x && dest.y == y)
             return reconstruct_path(current);
 
@@ -565,18 +589,18 @@ std::vector<vec2> pathfind_astar(Map* map, vec2 start, vec2 dest) {
         if (x > map->width) continue;
         if (y > map->height) continue;
         if(!blocked_tile(map->grid[x + y * map->width]))
-            process_successor(x, y, 1 + getDistanceE(x, y, dest.x, dest.y), current, open, closed);
+            process_successor(x, y, current->fcost + getDistanceE(x, y, dest.x, dest.y), current, open, closed);
         else if(dest.x == x && dest.y == y)
             return reconstruct_path(current);
 
+#ifdef DIAGONAL_ASTAR
         //DIAGONALS
-
         x = current->x + 1;
         y = current->y + 1;
         if (x > map->width) continue;
         if (y > map->height) continue;
         if(!blocked_tile(map->grid[x + y * map->width]))
-            process_successor(x, y, 1 + getDistanceE(x, y, dest.x, dest.y), current, open, closed);
+            process_successor(x, y, current->fcost + getDistanceE(x, y, dest.x, dest.y), current, open, closed);
         else if(dest.x == x && dest.y == y)
             return reconstruct_path(current);
 
@@ -585,7 +609,7 @@ std::vector<vec2> pathfind_astar(Map* map, vec2 start, vec2 dest) {
         if (x > map->width) continue;
         if (y > map->height) continue;
         if(!blocked_tile(map->grid[x + y * map->width]))
-            process_successor(x, y, 1 + getDistanceE(x, y, dest.x, dest.y), current, open, closed);
+            process_successor(x, y, current->fcost + getDistanceE(x, y, dest.x, dest.y), current, open, closed);
         else if(dest.x == x && dest.y == y)
             return reconstruct_path(current);
 
@@ -594,7 +618,7 @@ std::vector<vec2> pathfind_astar(Map* map, vec2 start, vec2 dest) {
         if (x > map->width) continue;
         if (y > map->height) continue;
         if(!blocked_tile(map->grid[x + y * map->width]))
-            process_successor(x, y, 1 + getDistanceE(x, y, dest.x, dest.y), current, open, closed);
+            process_successor(x, y, current->fcost+ getDistanceE(x, y, dest.x, dest.y), current, open, closed);
         else if(dest.x == x && dest.y == y)
             return reconstruct_path(current);
 
@@ -603,16 +627,15 @@ std::vector<vec2> pathfind_astar(Map* map, vec2 start, vec2 dest) {
         if (x > map->width) continue;
         if (y > map->height) continue;
         if(!blocked_tile(map->grid[x + y * map->width]))
-            process_successor(x, y, 1 + getDistanceE(x, y, dest.x, dest.y), current, open, closed);
+            process_successor(x, y, current->fcost + getDistanceE(x, y, dest.x, dest.y), current, open, closed);
         else if(dest.x == x && dest.y == y)
             return reconstruct_path(current);
+#endif
 
-
-        closed.push_back(current);
     }
-    //if (tries == 650) {
-    return reconstruct_path(current);
-    //}
+    if (tries == 650) {
+        return reconstruct_path(current);
+    }
     std::vector<vec2> blank;
     blank.push_back(start);
     return blank;
@@ -623,62 +646,25 @@ std::vector<vec2> pathfind_astar(Map* map, vec2 start, vec2 dest) {
 //
 
 static inline
-i32 find_neighbors(i32 id, i32* startmap, u16 x, u16 y, u16 width) {
-    i32 count = 0;
+void place_random_room(Map* map, u32 width, u32 height, vec2 origin, i32* x, i32* y) {
+    *x = 0;
+    *y = 0;
+    do {
+        *x = random_int(2, map->width-height-2);
+        *y = random_int(2, map->height-width-2);
+    } while(*x + width > map->width && *y + height > map->height&& getDistanceE(*x, *y, origin.x, origin.y) < 6 && getDistanceE(*x, *y, origin.x, origin.y) > 4);
 
-    for(i32 i = -1; i < 2; ++i) {
-        for(i32 j = -1; j < 2; ++j) {
-            i32 neighborx = x + i;
-            i32 neighbory = y + j;
-            if(i == 0 && j == 0)
-                continue;
-
-            if(startmap[neighborx + neighbory * width] == id)
-                count++;
+    if(origin.x != -1 && origin.y != -1) {
+        std::vector<vec2> path = pathfind_astar(map, {(f32)*x, (f32)*y}, origin);
+        for(u32 i = 0; i < path.size(); ++i){
+            u32 index = path[i].x + path[i].y * map->width;
+            map->grid[index] = 0;
         }
     }
 
-    return count;
-}
-
-static inline
-void cellular_automata_step(i32* grid, i32* startmap, u16 width, u16 height) {
-    for(u16 x = 0; x < width; ++x) {
-        for(u16 y = 0; y < height; ++y) {
-            if(grid[x + y * width] == 0) {
-                if(find_neighbors(0, startmap, x, y, width) < 4)
-                    grid[x + y * width] = 0;
-                else
-                    grid[x + y * width] = 8;
-            } 
-            else {
-                if(find_neighbors(8, startmap, x, y, width) > 5)
-                    grid[x + y * width] = 8;
-                else
-                    grid[x + y * width] = 0;
-            }
-        }
-    }
-
-    for(u16 i = 0; i < width * height; ++i)
-        startmap[i] = grid[i];
-}
-
-static inline
-void cellular_automata(i32 spawnchance, i32* grid, u16 width, u16 height) {
-    i32* startmap = (i32*)malloc(sizeof(i32) * (width * height));
-
-    for(u16 x = 0; x < width; ++x) {
-        for(u16 y = 0; y < height; ++y) {
-            i32 chance = random_int(0, 100);
-            if(chance <= spawnchance)
-                startmap[x + y * width] = 8;
-        }
-    }
-
-    u8 passes = random_int(5, 10);
-    for(u8 i = 0; i < passes; ++i)
-        cellular_automata_step(grid, startmap, width, height);
+    for(u32 i = *x; i < *x + width; ++i)
+        for(u32 j = *y; j < *y + height; ++j)
+            map->grid[i + j * map->width] = 0;
 }
 
 static inline
@@ -690,13 +676,20 @@ Map load_random_map(i32 width, i32 height) {
     map.grid = (i32*)malloc(sizeof(i32) * (map.width * map.height));
 
     for(u32 i = 0; i < width * height; ++i)
-        map.grid[i] = 0;
+        map.grid[i] = 8;
 
-    for(u32 x = 15; x < 20; ++x)
-        for(u32 y = 15; y < 20; ++y)
-            map.grid[x + y * width] = 8;
+    i32 x = 0;
+    i32 y = 0;
+    place_random_room(&map, 5, 5, {-1, -1}, &x, &y);
+    place_random_room(&map, 8, 8, {(f32)x, (f32)y}, &x, &y);
 
-    //cellular_automata(15, map.grid, width, height);
+    for(u32 i = 0; i < width*height; ++i) {
+        if(map.grid[i] == 8)
+            map.grid[i] = 0;
+        else
+            map.grid[i] = 8;
+    }
+
     orient_tiles(&map);
 
     return map;
@@ -705,9 +698,9 @@ Map load_random_map(i32 width, i32 height) {
 static inline
 void draw_map(RenderBatch* batch, Map* map, Texture tileset) {
     i32 x0 = (-map->x / TILE_SIZE);
-    i32 x1 = (-map->x / TILE_SIZE) + (get_window_width() / TILE_SIZE) + 3;
+    i32 x1 = (-map->x / TILE_SIZE) + (get_virtual_width() / TILE_SIZE) + 1;
     i32 y0 = (-map->y / TILE_SIZE);
-    i32 y1 = (-map->y / TILE_SIZE) + (get_window_height() / TILE_SIZE) + 3;
+    i32 y1 = (-map->y / TILE_SIZE) + (get_virtual_height() / TILE_SIZE) + 2;
 
     clamp(&x0, 0, map->width);
     clamp(&x1, 0, map->width);
@@ -717,8 +710,8 @@ void draw_map(RenderBatch* batch, Map* map, Texture tileset) {
     Rect dest = {0, 0, (f32)TILE_SIZE, (f32)TILE_SIZE};
     Rect src = {0, 0, (f32)TILE_SIZE, (f32)TILE_SIZE};
 
-    for(u32 x = 0; x < map->width; ++x) {
-        for(u32 y = 0; y < map->height; ++y) {
+    for(u32 x = x0; x < x1; ++x) {
+        for(u32 y = y0; y < y1; ++y) {
             i32 id = map->grid[x + y * map->width];
 
             dest.x = (x * TILE_SIZE) + map->x;
@@ -729,6 +722,15 @@ void draw_map(RenderBatch* batch, Map* map, Texture tileset) {
             draw_texture_EX(batch, tileset, src, dest);
         }
     }
+    if(is_key_down(KEY_LEFT))
+        map->x += SCROLL_SPEED;
+    if(is_key_down(KEY_RIGHT))
+        map->x -= SCROLL_SPEED;
+    if(is_key_down(KEY_DOWN))
+        map->y -= SCROLL_SPEED;
+    if(is_key_down(KEY_UP))
+        map->y += SCROLL_SPEED;
+
 }
 
 static inline
